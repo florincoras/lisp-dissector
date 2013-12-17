@@ -27,9 +27,14 @@
 #include "config.h"
 
 #include <epan/packet.h>
+#include <epan/to_str.h>
 #include <epan/afn.h>
 #include <epan/ipv6-utils.h>
 #include <epan/expert.h>
+#include <epan/wmem/wmem.h>
+
+void proto_register_lisp(void);
+void proto_reg_handoff_lisp(void);
 
 #define INET_ADDRLEN        4
 #define INET6_ADDRLEN       16
@@ -224,6 +229,13 @@ static gint ett_lisp_record = -1;
 static gint ett_lisp_lcaf = -1;
 static gint ett_lisp_elp = -1;
 
+static expert_field ei_lisp_undecoded = EI_INIT;
+static expert_field ei_lisp_lcaf_type = EI_INIT;
+static expert_field ei_lisp_expected_field = EI_INIT;
+static expert_field ei_lisp_unexpected_field = EI_INIT;
+
+static dissector_handle_t lisp_handle;
+
 static dissector_handle_t ipv4_handle;
 static dissector_handle_t ipv6_handle;
 static dissector_handle_t data_handle;
@@ -336,7 +348,7 @@ get_addr_str(tvbuff_t *tvb, gint offset, guint16 afi, guint16 *addr_len)
                 iid = tvb_get_ntohl(tvb, offset + LCAF_HEADER_LEN);
                 afi = tvb_get_ntohs(tvb, offset + LCAF_HEADER_LEN + 4);
                 addr_str = get_addr_str(tvb, offset + LCAF_HEADER_LEN + 6, afi, &cur_len);
-                return ep_strdup_printf("[%d] %s", iid, addr_str);
+                return wmem_strdup_printf(wmem_packet_scope(), "[%d] %s", iid, addr_str);
             }
             return addr_str;
         default:
@@ -356,7 +368,7 @@ dissect_lcaf_natt_rloc(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
     rloc_str = get_addr_str(tvb, offset, rloc_afi, &addr_len);
 
     if (rloc_str == NULL) {
-        expert_add_info_format(pinfo, tree, PI_PROTOCOL, PI_ERROR,
+        expert_add_info_format(pinfo, tree, &ei_lisp_unexpected_field,
                 "Unexpected RLOC AFI (%d), cannot decode", rloc_afi);
         return offset;
     }
@@ -385,7 +397,7 @@ dissect_lcaf_elp_hop(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
     hop_str   = get_addr_str(tvb, offset, hop_afi, &addr_len);
 
     if (hop_str == NULL) {
-        expert_add_info_format(pinfo, tree, PI_PROTOCOL, PI_ERROR,
+        expert_add_info_format(pinfo, tree, &ei_lisp_unexpected_field,
                 "Unexpected reencap hop AFI (%d), cannot decode", hop_afi);
         return offset;
     }
@@ -456,7 +468,7 @@ dissect_lcaf_afi_list(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
                 remaining -= (offset - old_offset);
                 break;
             default:
-                expert_add_info_format(pinfo, tree, PI_PROTOCOL, PI_ERROR,
+                expert_add_info_format(pinfo, tree, &ei_lisp_unexpected_field,
                         "Unexpected AFI (%d), cannot decode", afi);
                 return -1;
         }
@@ -687,10 +699,9 @@ dissect_lcaf(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, gint offset)
             break;
         default:
             if (lcaf_type < 13)
-                expert_add_undecoded_item(tvb, pinfo, tree, offset,
-                        len, PI_WARN);
+		proto_tree_add_expert(tree, pinfo, &ei_lisp_undecoded, tvb, offset, len);
             else
-                expert_add_info_format(pinfo, tree, PI_PROTOCOL, PI_ERROR,
+                expert_add_info_format(pinfo, tree, &ei_lisp_lcaf_type,
                         "LCAF type %d is not defined in draft-farinacci-lisp-lcaf-%d",
                         lcaf_type, LCAF_DRAFT_VERSION);
             return offset + len;
@@ -739,7 +750,7 @@ dissect_lisp_locator(tvbuff_t *tvb, packet_info *pinfo, proto_tree *lisp_mapping
     locator = get_addr_str(tvb, offset, loc_afi, &addr_len);
 
     if (locator == NULL) {
-        expert_add_info_format(pinfo, lisp_mapping_tree, PI_PROTOCOL, PI_ERROR,
+        expert_add_info_format(pinfo, lisp_mapping_tree, &ei_lisp_unexpected_field,
                 "Unexpected locator AFI (%d), cannot decode", loc_afi);
         return offset;
     }
@@ -811,7 +822,7 @@ dissect_lisp_mapping(tvbuff_t *tvb, packet_info *pinfo, proto_tree *lisp_tree,
     prefix = get_addr_str(tvb, offset, prefix_afi, &addr_len);
 
     if (prefix == NULL) {
-        expert_add_info_format(pinfo, lisp_tree, PI_PROTOCOL, PI_ERROR,
+        expert_add_info_format(pinfo, lisp_tree, &ei_lisp_unexpected_field,
                 "Unexpected EID prefix AFI (%d), cannot decode", prefix_afi);
         return offset;
     }
@@ -1011,7 +1022,7 @@ dissect_lisp_map_request(tvbuff_t *tvb, packet_info *pinfo, proto_tree *lisp_tre
             offset += addr_len;
             break;
         default:
-            expert_add_info_format(pinfo, lisp_tree, PI_PROTOCOL, PI_ERROR,
+            expert_add_info_format(pinfo, lisp_tree, &ei_lisp_unexpected_field,
                     "Unexpected Source EID AFI (%d), cannot decode", src_eid_afi);
             next_tvb = tvb_new_subset_remaining(tvb, offset);
             call_dissector(data_handle, next_tvb, pinfo, lisp_tree);
@@ -1050,7 +1061,7 @@ dissect_lisp_map_request(tvbuff_t *tvb, packet_info *pinfo, proto_tree *lisp_tre
                 offset += INET6_ADDRLEN + 2;
                 break;
             default:
-                expert_add_info_format(pinfo, lisp_tree, PI_PROTOCOL, PI_ERROR,
+                expert_add_info_format(pinfo, lisp_tree, &ei_lisp_unexpected_field,
                         "Unexpected ITR-RLOC-AFI (%d), cannot decode", itr_afi);
                 next_tvb = tvb_new_subset_remaining(tvb, offset);
                 call_dissector(data_handle, next_tvb, pinfo, lisp_tree);
@@ -1073,7 +1084,7 @@ dissect_lisp_map_request(tvbuff_t *tvb, packet_info *pinfo, proto_tree *lisp_tre
         prefix = get_addr_str(tvb, offset + 4, prefix_afi, &addr_len);
 
         if (prefix == NULL) {
-            expert_add_info_format(pinfo, lisp_tree, PI_PROTOCOL, PI_ERROR,
+            expert_add_info_format(pinfo, lisp_tree, &ei_lisp_unexpected_field,
                     "Unexpected EID prefix AFI (%d), cannot decode", prefix_afi);
             next_tvb = tvb_new_subset_remaining(tvb, offset);
             call_dissector(data_handle, next_tvb, pinfo, lisp_tree);
@@ -1584,7 +1595,7 @@ dissect_lisp_info(tvbuff_t *tvb, packet_info *pinfo, proto_tree *lisp_tree)
     prefix      = get_addr_str(tvb, offset, prefix_afi, &addr_len);
 
     if (prefix == NULL) {
-        expert_add_info_format(pinfo, lisp_tree, PI_PROTOCOL, PI_ERROR,
+        expert_add_info_format(pinfo, lisp_tree, &ei_lisp_unexpected_field,
                 "Unexpected EID prefix AFI (%d), cannot decode", prefix_afi);
         next_tvb = tvb_new_subset_remaining(tvb, offset);
         call_dissector(data_handle, next_tvb, pinfo, lisp_tree);
@@ -1603,12 +1614,12 @@ dissect_lisp_info(tvbuff_t *tvb, packet_info *pinfo, proto_tree *lisp_tree)
 
     if (!reply) {
         if (afi != 0) {
-            expert_add_info_format(pinfo, tir, PI_PROTOCOL, PI_ERROR,
+            expert_add_info_format(pinfo, tir, &ei_lisp_unexpected_field,
                     "Expecting NULL AFI (0), found %d, incorrect packet!", afi);
         }
     } else {
         if (afi != AFNUM_LCAF) {
-            expert_add_info_format(pinfo, tir, PI_PROTOCOL, PI_ERROR,
+            expert_add_info_format(pinfo, tir, &ei_lisp_unexpected_field,
                     "Expecting LCAF AFI (%d), found %d, incorrect packet!",
                     AFNUM_LCAF, afi);
         } else {
@@ -1969,6 +1980,16 @@ proto_register_lisp(void)
         &ett_lisp_elp
     };
 
+    static ei_register_info ei[] = {
+        { &ei_lisp_undecoded, { "lisp.undecoded", PI_UNDECODED, PI_WARN, "Not dissected yet (report to wireshark.org)", EXPFILL }},
+        { &ei_lisp_unexpected_field, { "lisp.unexpected_field", PI_PROTOCOL, PI_ERROR, "Unexpected field", EXPFILL }},
+        { &ei_lisp_lcaf_type, { "lisp.lcaf.type.invalid", PI_PROTOCOL, PI_ERROR, "LCAF type is not defined in draft-farinacci-lisp-lcaf-X", EXPFILL }},
+        { &ei_lisp_expected_field, { "lisp.expected_field", PI_PROTOCOL, PI_ERROR, "Expecting field", EXPFILL }},
+    };
+
+    expert_module_t* expert_lisp;
+
+
     /* Register the protocol name and description */
     proto_lisp = proto_register_protocol("Locator/ID Separation Protocol",
         "LISP Control", "lisp");
@@ -1976,9 +1997,11 @@ proto_register_lisp(void)
     /* Required function calls to register the header fields and subtrees used */
     proto_register_field_array(proto_lisp, hf, array_length(hf));
     proto_register_subtree_array(ett, array_length(ett));
+    expert_lisp = expert_register_protocol(proto_lisp);
+    expert_register_field_array(expert_lisp, ei, array_length(ei));
 
     /* Register dissector so that other dissectors can call it */
-    new_register_dissector("lisp", dissect_lisp, proto_lisp);
+    lisp_handle = new_register_dissector("lisp", dissect_lisp, proto_lisp);
 }
 
 
@@ -1990,9 +2013,9 @@ proto_register_lisp(void)
 void
 proto_reg_handoff_lisp(void)
 {
-    dissector_handle_t lisp_handle;
+    //dissector_handle_t lisp_handle;
 
-    lisp_handle = new_create_dissector_handle(dissect_lisp, proto_lisp);
+    //lisp_handle = new_create_dissector_handle(dissect_lisp, proto_lisp);
     dissector_add_uint("udp.port", LISP_CONTROL_PORT, lisp_handle);
     ipv4_handle = find_dissector("ip");
     ipv6_handle = find_dissector("ipv6");
