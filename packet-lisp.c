@@ -392,8 +392,8 @@ dissect_lcaf_elp_hop(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
     const gchar *hop_str;
     proto_item  *ti;
 
-    hop_afi   = tvb_get_ntohs(tvb, offset); offset += 2;
     hop_flags = tvb_get_ntohs(tvb, offset); offset += 2;
+    hop_afi   = tvb_get_ntohs(tvb, offset); offset += 2;
     hop_str   = get_addr_str(tvb, offset, hop_afi, &addr_len);
 
     if (hop_str == NULL) {
